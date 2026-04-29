@@ -1,4 +1,4 @@
-﻿using System.Collections.Specialized;
+using System.Collections.Specialized;
 using IdPowerToys.PowerPointGenerator.Infrastructure;
 using Microsoft.Graph;
 using Microsoft.Graph.Beta;
@@ -194,7 +194,8 @@ public class GraphHelper
             var res = await responseBatch.GetResponseByIdAsync(key);
             if (res.StatusCode == System.Net.HttpStatusCode.NotFound)
             {
-                directoryObjects.Add(obj.Id, GetDeletedLabel(obj));
+                var fallbackName = await ResolveDirectoryObjectFallbackName(obj);
+                directoryObjects.Add(obj.Id, string.IsNullOrWhiteSpace(fallbackName) ? GetDeletedLabel(obj) : fallbackName);
             }
             else
             {
@@ -231,10 +232,47 @@ public class GraphHelper
                         var resTenant = await responseBatch.GetResponseByIdAsync<TenantInformation>(key); name = resTenant.DisplayName;
                         break;
                 }
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    name = await ResolveDirectoryObjectFallbackName(obj);
+                }
                 name = string.IsNullOrEmpty(name) ? Helper.GetShortId(obj.Id) : name;
                 directoryObjects.Add(obj.Id, name);
             }
         }
+    }
+
+    private async Task<string?> ResolveDirectoryObjectFallbackName(GraphHelperBatch obj)
+    {
+        // Some CA policy IDs can be returned under an unexpected bucket (user vs group).
+        // Try alternate directory object types before marking as deleted.
+        try
+        {
+            switch (obj.Type)
+            {
+                case BatchType.User:
+                    var group = await _graph.Groups[obj.Id].GetAsync();
+                    if (!string.IsNullOrWhiteSpace(group?.DisplayName)) return group.DisplayName;
+
+                    var spFromUser = await _graph.ServicePrincipals[obj.Id].GetAsync();
+                    if (!string.IsNullOrWhiteSpace(spFromUser?.DisplayName)) return spFromUser.DisplayName;
+                    break;
+
+                case BatchType.Group:
+                    var user = await _graph.Users[obj.Id].GetAsync();
+                    if (!string.IsNullOrWhiteSpace(user?.DisplayName)) return user.DisplayName;
+
+                    var spFromGroup = await _graph.ServicePrincipals[obj.Id].GetAsync();
+                    if (!string.IsNullOrWhiteSpace(spFromGroup?.DisplayName)) return spFromGroup.DisplayName;
+                    break;
+            }
+        }
+        catch
+        {
+            // Ignore fallback lookup failures and keep existing deleted label behavior.
+        }
+
+        return null;
     }
 
     private static string GetDeletedLabel(GraphHelperBatch obj)
